@@ -12,3 +12,5 @@ python-multipart>=0.0.9
 aiohttp>=3.9.0
 wavelink>=3.0.0
 davey>=0.1.6
+certifi>=2024.0.0
+gTTS>=2.5,<3
