@@ -14,4 +14,4 @@ ENV NODE_ENV=production
 COPY --from=builder /app ./
 
 EXPOSE 3000
-CMD ["sh", "-c", "npm run start -- -p ${PORT:-3000}"]
+CMD ["node", ".next/standalone/server.js"]
