@@ -1,41 +1,49 @@
-const stats = [
-  { label: "Servers", value: "12", note: "+2 this month" },
-  { label: "Members managed", value: "24.8k", note: "+8.4% this month" },
-  { label: "Automod actions", value: "1,284", note: "-12.2% this week" }
-];
+"use client";
 
-const modules = [
-  { name: "Security", description: "Anti-raid, anti-spam, and automod controls.", status: "Configured" },
-  { name: "Leveling", description: "XP rewards, rank cards, and announcements.", status: "Configure" },
-  { name: "Audio", description: "Lavalink nodes, music, and voice settings.", status: "Configure" },
-  { name: "Tickets", description: "Support panels and transcript logging.", status: "Configure" }
-];
+import { FormEvent, useCallback, useEffect, useState } from "react";
+
+type Place = { name: string; country?: string; latitude: number; longitude: number; timezone?: string };
+type Weather = { current: { temperature_2m: number; apparent_temperature: number; relative_humidity_2m: number; wind_speed_10m: number; weather_code: number; is_day: number }; hourly: { time: string[]; temperature_2m: number[]; precipitation_probability: number[]; weather_code: number[] }; daily: { time: string[]; weather_code: number[]; temperature_2m_max: number[]; temperature_2m_min: number[]; precipitation_probability_max: number[] }; current_units: { temperature_2m: string; wind_speed_10m: string } };
+
+const descriptions: Record<number, string> = { 0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast", 45: "Foggy", 48: "Rime fog", 51: "Light drizzle", 53: "Drizzle", 55: "Heavy drizzle", 61: "Light rain", 63: "Rain", 65: "Heavy rain", 71: "Light snow", 73: "Snow", 75: "Heavy snow", 80: "Rain showers", 81: "Rain showers", 82: "Heavy showers", 95: "Thunderstorm", 96: "Thunderstorm", 99: "Thunderstorm" };
+const icons: Record<number, string> = { 0: "☀", 1: "◐", 2: "⛅", 3: "☁", 45: "≋", 48: "≋", 51: "☂", 53: "☂", 55: "☂", 61: "☂", 63: "☂", 65: "☂", 71: "❄", 73: "❄", 75: "❄", 80: "☂", 81: "☂", 82: "☂", 95: "ϟ", 96: "ϟ", 99: "ϟ" };
+const text = (code: number) => descriptions[code] ?? "Unknown conditions";
+const glyph = (code: number) => icons[code] ?? "•";
 
 export default function HomePage() {
-  return (
-    <main className="shell">
-      <aside className="sidebar">
-        <div className="brand"><span className="brand-mark">T</span><span>Titanium White</span></div>
-        <div className="workspace"><span className="server-icon">A</span><div><strong>Anx6ty&apos;s server</strong><small>Community workspace</small></div><span className="chevron">⌄</span></div>
-        <nav aria-label="Primary navigation">
-          <p className="nav-label">Workspace</p>
-          <a className="nav-item active" href="#overview">Overview</a>
-          <a className="nav-item" href="#modules">Modules</a>
-          <a className="nav-item" href="#settings">Server settings</a>
-          <a className="nav-item" href="#audit">Audit log</a>
-          <p className="nav-label">Account</p>
-          <a className="nav-item" href="#profile">Profile</a>
-        </nav>
-        <div className="sidebar-footer"><div className="avatar">A</div><div><strong>anx6ty</strong><small>Administrator</small></div><button aria-label="Account menu">•••</button></div>
-      </aside>
+  const [place, setPlace] = useState<Place>({ name: "London", country: "United Kingdom", latitude: 51.5074, longitude: -0.1278, timezone: "Europe/London" });
+  const [weather, setWeather] = useState<Weather | null>(null);
+  const [query, setQuery] = useState("");
+  const [unit, setUnit] = useState<"celsius" | "fahrenheit">("celsius");
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState("");
 
-      <section className="content">
-        <header className="topbar"><div><p className="eyebrow">Saturday, September 19, 2026</p><h1>Good evening, anx6ty.</h1></div><button className="primary-button">Invite bot <span>↗</span></button></header>
-        <div className="server-banner"><div className="server-icon large">A</div><div><p className="eyebrow">Selected server</p><h2>Anx6ty&apos;s server</h2></div><span className="online-dot" /> <span className="online-label">Bot online</span></div>
-        <section id="overview" className="stats-grid">{stats.map((stat) => <article className="stat-card" key={stat.label}><p>{stat.label}</p><strong>{stat.value}</strong><small>{stat.note}</small></article>)}</section>
-        <section id="modules" className="section"><div className="section-heading"><div><p className="eyebrow">Control center</p><h2>Bot modules</h2></div><a href="#all-modules">View all <span>→</span></a></div><div className="module-grid">{modules.map((module) => <article className="module-card" key={module.name}><div className="module-icon">✦</div><div className="module-body"><div className="module-title"><h3>{module.name}</h3><span className={module.status === "Configured" ? "status configured" : "status"}>{module.status}</span></div><p>{module.description}</p><button>{module.status === "Configured" ? "Manage module" : "Set up module"} <span>→</span></button></div></article>)}</div></section>
-        <section id="audit" className="section lower-grid"><article className="activity-card"><div className="section-heading"><div><p className="eyebrow">Latest events</p><h2>Recent activity</h2></div><a href="#audit-log">Audit log <span>→</span></a></div><div className="activity-row"><span className="activity-dot warning" /><div><strong>Automod blocked a link</strong><small>2 minutes ago · #general</small></div><span className="activity-kind">Security</span></div><div className="activity-row"><span className="activity-dot success" /><div><strong>Welcome message sent</strong><small>18 minutes ago · @new-member</small></div><span className="activity-kind">Welcome</span></div><div className="activity-row"><span className="activity-dot neutral" /><div><strong>Configuration updated</strong><small>1 hour ago · by anx6ty</small></div><span className="activity-kind">Settings</span></div></article><article className="health-card"><p className="eyebrow">System status</p><h2>Everything is healthy</h2><p className="health-copy">Your bot and dashboard services are operating normally.</p><div className="health-line"><span><i className="health-dot" />Discord gateway</span><strong>Operational</strong></div><div className="health-line"><span><i className="health-dot" />Database</span><strong>Operational</strong></div><div className="health-line"><span><i className="health-dot" />Lavalink</span><strong>Operational</strong></div></article></section>
-      </section>
-    </main>
-  );
+  const load = useCallback(async () => {
+    setLoading(true); setMessage("");
+    try {
+      const params = new URLSearchParams({ latitude: String(place.latitude), longitude: String(place.longitude), current: "temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day", hourly: "temperature_2m,precipitation_probability,weather_code", daily: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max", forecast_days: "7", timezone: "auto", temperature_unit: unit, wind_speed_unit: "kmh" });
+      const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params}`);
+      if (!response.ok) throw new Error("Weather service unavailable.");
+      setWeather(await response.json());
+    } catch (error) { setMessage(error instanceof Error ? error.message : "Unable to load weather."); } finally { setLoading(false); }
+  }, [place, unit]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function search(event: FormEvent) {
+    event.preventDefault(); if (!query.trim()) return;
+    setLoading(true); setMessage("");
+    try {
+      const response = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=1&language=en&format=json`);
+      const data = await response.json(); if (!data.results?.[0]) throw new Error("No city found.");
+      setPlace(data.results[0]); setQuery("");
+    } catch (error) { setMessage(error instanceof Error ? error.message : "Search failed."); setLoading(false); }
+  }
+
+  const formatTemp = (value: number) => `${Math.round(value)}°`;
+  const nowIndex = weather ? Math.max(0, weather.hourly.time.findIndex((time) => new Date(time).getTime() >= Date.now())) : 0;
+  const hour = new Intl.DateTimeFormat("en", { hour: "numeric" });
+  const date = new Intl.DateTimeFormat("en", { weekday: "short", month: "short", day: "numeric" });
+
+  return <main className="weather-shell"><header className="weather-header"><div className="weather-brand"><span className="brand-mark">◒</span>Atmos</div><form className="search" onSubmit={search}><span>⌕</span><input aria-label="Search city" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search a city..." /><button>Search</button></form><div className="header-actions"><div className="units"><button className={unit === "celsius" ? "selected" : ""} onClick={() => setUnit("celsius")}>°C</button><button className={unit === "fahrenheit" ? "selected" : ""} onClick={() => setUnit("fahrenheit")}>°F</button></div></div></header><section className="weather-content"><div className="location-heading"><div><p className="eyebrow">Your forecast</p><h1>{place.name}</h1><p className="country">{place.country} · {place.timezone}</p></div><p className="updated">Live data from Open-Meteo</p></div>{message && <div className="error-banner">{message}</div>}{loading && !weather ? <div className="loading">Loading forecast...</div> : weather && <><section className="current-card"><div className="current-icon">{glyph(weather.current.weather_code)}</div><div><p className="eyebrow">Now</p><div className="current-temperature">{formatTemp(weather.current.temperature_2m)}<span>{weather.current_units.temperature_2m}</span></div><h2>{text(weather.current.weather_code)}</h2><p className="feels">Feels like {formatTemp(weather.current.apparent_temperature)} · {weather.current.is_day ? "Daylight" : "Night"}</p></div><div className="current-details"><div><span>Humidity</span><strong>{weather.current.relative_humidity_2m}%</strong></div><div><span>Wind</span><strong>{Math.round(weather.current.wind_speed_10m)} {weather.current_units.wind_speed_10m}</strong></div><div><span>Rain chance</span><strong>{weather.hourly.precipitation_probability[nowIndex] ?? 0}%</strong></div></div></section><section className="weather-section"><p className="eyebrow">Next 24 hours</p><h2>Hourly forecast</h2><div className="hourly-grid">{weather.hourly.time.slice(nowIndex, nowIndex + 8).map((time, index) => { const i = nowIndex + index; return <article className="hour-card" key={time}><span>{index ? hour.format(new Date(time)) : "Now"}</span><strong>{glyph(weather.hourly.weather_code[i])}</strong><b>{formatTemp(weather.hourly.temperature_2m[i])}</b><small>{weather.hourly.precipitation_probability[i]}% rain</small></article>; })}</div></section><section className="weather-section"><p className="eyebrow">Plan ahead</p><h2>7-day forecast</h2><div className="daily-list">{weather.daily.time.map((day, index) => <article className="day-row" key={day}><strong>{index ? date.format(new Date(`${day}T12:00:00`)) : "Today"}</strong><span className="day-icon">{glyph(weather.daily.weather_code[index])}</span><span className="day-description">{text(weather.daily.weather_code[index])}</span><span className="rain">{weather.daily.precipitation_probability_max[index]}% rain</span><b>{formatTemp(weather.daily.temperature_2m_max[index])} <em>{formatTemp(weather.daily.temperature_2m_min[index])}</em></b></article>)}</div></section></>}<footer>Weather data by <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Open-Meteo</a> · No API key required</footer></section></main>;
 }
