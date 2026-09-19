@@ -1,14 +1,14 @@
-FROM node:20-alpine
+FROM python:3.12-slim
 
 WORKDIR /app
 
-# Agar aapka bot Node.js hai to yeh line use karo
-# COPY . .
-# CMD ["node", "index.js"]
+COPY requirements.txt ./
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Agar bot Python hai to yeh line use karo
-# COPY . .
-# CMD ["python3", "main.py"]
+COPY bot.py ./
 
-# Agar abhi koi bot file nahi hai, to temporary fail command rakho
-CMD ["sh", "-c", "echo 'No bot entrypoint found'; exit 1"]
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+
+CMD ["python3", "bot.py"]
