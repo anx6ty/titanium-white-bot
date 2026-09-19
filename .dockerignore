@@ -1,0 +1,9 @@
+node_modules
+dashboard/node_modules
+dashboard/.next
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+npm-debug.log*
