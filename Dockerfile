@@ -1,17 +1,14 @@
-FROM node:20-alpine AS builder
+FROM node:20-alpine
 
 WORKDIR /app
-COPY dashboard/package*.json ./
-RUN npm install
 
-COPY dashboard/ ./
-RUN npm run build
+# Agar aapka bot Node.js hai to yeh line use karo
+# COPY . .
+# CMD ["node", "index.js"]
 
-FROM node:20-alpine AS runner
-WORKDIR /app
-ENV NODE_ENV=production
+# Agar bot Python hai to yeh line use karo
+# COPY . .
+# CMD ["python3", "main.py"]
 
-COPY --from=builder /app ./
-
-EXPOSE 3000
-CMD ["node", ".next/standalone/server.js"]
+# Agar abhi koi bot file nahi hai, to temporary fail command rakho
+CMD ["sh", "-c", "echo 'No bot entrypoint found'; exit 1"]
