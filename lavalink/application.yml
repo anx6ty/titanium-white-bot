@@ -1,0 +1,21 @@
+# Lavalink v4 example. Keep credentials in environment variables in production.
+server:
+  port: 2333
+  address: 0.0.0.0
+lavalink:
+  server:
+    password: "youshallnotpass"
+    sources:
+      youtube: true
+      bandcamp: true
+      soundcloud: true
+      twitch: true
+      vimeo: true
+      http: true
+      local: false
+plugins:
+  lavasrc:
+    providers: "ytsearch,ytmsearch,scsearch,spsearch"
+metrics:
+  prometheus:
+    enabled: false

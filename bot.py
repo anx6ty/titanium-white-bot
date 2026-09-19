@@ -1,290 +1,259 @@
+from __future__ import annotations
+
 import asyncio
-import os
-import sys
-import tempfile
+import time
+from collections import defaultdict, deque
+from datetime import timedelta
 
 import discord
 from discord import app_commands
 from discord.ext import commands
-from gtts import gTTS
-from pymongo import MongoClient
 
-ROLE_NAME = "Not Welcomed"
+from app.config import settings
+from app.database.mongo import get_db, mongo
+from app.log import logger
+from app.services.permissions import require_admin, require_moderator, safe_send
+from app.services.whitelist import whitelist_service
 
-
-def require_env(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        raise RuntimeError(f"Missing required environment variable: {name}")
-    return value
+COLOR = discord.Color.from_str("#2B2D31")
 
 
-def get_db():
-    uri = os.getenv("DATABASE_URL") or os.getenv("MONGODB_URI")
-    if not uri:
-        raise RuntimeError("Missing DATABASE_URL/MONGODB_URI")
-    mongo = MongoClient(uri, serverSelectionTimeoutMS=10000)
-    return mongo[os.getenv("DATABASE_NAME", "titanium_white")]
+def embed(title: str, description: str = "", *, colour: discord.Color = COLOR) -> discord.Embed:
+    return discord.Embed(title=title, description=description, colour=colour)
 
 
-class TitaniumWhiteBot(commands.Bot):
+class ConfigView(discord.ui.View):
+    def __init__(self, bot: "TitaniumBot"):
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.add_item(ConfigSelect(bot))
+
+
+class ConfigSelect(discord.ui.Select):
+    def __init__(self, bot: "TitaniumBot"):
+        self.bot = bot
+        options = [discord.SelectOption(label=x, value=x.lower()) for x in ("Security", "Leveling", "Audio", "Tickets", "Welcome", "Logging")]
+        super().__init__(placeholder="Choose a configuration category", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await require_admin(interaction):
+            return
+        guild_id = interaction.guild_id
+        data = await self.bot.guild_config(guild_id)
+        key = self.values[0]
+        value = data.get(f"{key}_enabled", data.get("automod_enabled", True))
+        await interaction.response.send_message(
+            embed=embed(f"{key.title()} configuration", f"Enabled: **{value}**\nUse `/config toggle` to change feature flags."), ephemeral=True
+        )
+
+
+class LeaveView(discord.ui.View):
+    def __init__(self, bot: "TitaniumBot"):
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    @discord.ui.button(label="Create Leave", style=discord.ButtonStyle.primary, custom_id="leave:create")
+    async def create(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(LeaveModal(self.bot))
+
+
+class LeaveModal(discord.ui.Modal, title="Staff Leave Request"):
+    duration = discord.ui.TextInput(label="Leave duration", placeholder="e.g. 3 days", max_length=100)
+    reason = discord.ui.TextInput(label="Reason", style=discord.TextStyle.paragraph, max_length=1000)
+    start_date = discord.ui.TextInput(label="Start date", placeholder="YYYY-MM-DD", max_length=20)
+
+    def __init__(self, bot: "TitaniumBot"):
+        super().__init__()
+        self.bot = bot
+
+    async def on_submit(self, interaction: discord.Interaction):
+        config = await self.bot.guild_config(interaction.guild_id)
+        channel = interaction.guild.get_channel(config.get("leave_log_channel")) if config.get("leave_log_channel") else None
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Leave logging is not configured.", ephemeral=True)
+            return
+        card = embed("Staff Leave Request", f"Requested by {interaction.user.mention}")
+        card.add_field(name="Duration", value=self.duration.value, inline=True)
+        card.add_field(name="Start date", value=self.start_date.value, inline=True)
+        card.add_field(name="Reason", value=self.reason.value, inline=False)
+        await channel.send(embed=card)
+        await interaction.response.send_message("Your leave request was submitted.", ephemeral=True)
+
+
+class TitaniumBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.guilds = True
         intents.members = True
         intents.voice_states = True
         intents.message_content = True
-
-        super().__init__(command_prefix="!", intents=intents)
+        super().__init__(command_prefix=settings.bot_prefix, intents=intents)
         self.db = get_db()
-        self.greetvoice_configs = self.db.greetvoice_configs
-        self._guild_locks: dict[int, asyncio.Lock] = {}
-
-    # ---------- helpers ----------
-
-    def guild_lock(self, guild_id: int) -> asyncio.Lock:
-        return self._guild_locks.setdefault(guild_id, asyncio.Lock())
-
-    async def get_config(self, guild_id: int):
-        # pymongo is blocking -> run in a thread so the event loop isn't stalled
-        return await asyncio.to_thread(self.greetvoice_configs.find_one, {"guild_id": guild_id})
-
-    async def save_config(self, guild_id: int, channel_id: int, prompt: str):
-        await asyncio.to_thread(
-            self.greetvoice_configs.update_one,
-            {"guild_id": guild_id},
-            {"$set": {"guild_id": guild_id, "channel_id": channel_id, "prompt": prompt}},
-            True,  # upsert
-        )
-
-    async def get_or_create_role(self, guild: discord.Guild) -> discord.Role:
-        role = discord.utils.get(guild.roles, name=ROLE_NAME)
-        if role is None:
-            role = await guild.create_role(name=ROLE_NAME, reason="Onboarding greeting")
-        return role
-
-    async def apply_role_permissions(self, guild: discord.Guild, role: discord.Role, greet_channel):
-        """Deny the role everywhere except the greet voice channel."""
-        for target in guild.channels:
-            if target.id == greet_channel.id:
-                continue
-            try:
-                await target.set_permissions(
-                    role,
-                    view_channel=False,
-                    connect=False,
-                    speak=False,
-                    send_messages=False,
-                )
-            except Exception:
-                pass
-
-        try:
-            await greet_channel.set_permissions(
-                role,
-                view_channel=True,
-                connect=True,
-                speak=True,
-            )
-        except Exception as exc:
-            print(f"[bot] Failed to set greet channel permissions: {exc}")
-
-    # ---------- events ----------
+        self.guild_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self.spam: dict[tuple[int, int], deque[float]] = defaultdict(deque)
+        self.started_at = time.monotonic()
 
     async def setup_hook(self):
-        self.tree.on_error = self.on_app_command_error
-        try:
-            synced = await self.tree.sync()
-            print(f"[bot] Synced {len(synced)} application commands.")
-        except Exception as exc:
-            print(f"[bot] Slash command sync failed: {exc}")
+        mongo.ensure_indexes()
+        self.add_view(LeaveView(self))
+        await self.tree.sync()
+        logger.info("Application commands synchronised")
+
+    async def guild_config(self, guild_id: int) -> dict:
+        value = await asyncio.to_thread(self.db.guild_settings.find_one, {"guild_id": guild_id})
+        if value:
+            return value
+        defaults = {"guild_id": guild_id, "automod_enabled": True, "leveling_enabled": True, "music_enabled": True, "tickets_enabled": True}
+        await asyncio.to_thread(self.db.guild_settings.insert_one, defaults)
+        return defaults
+
+    async def set_config(self, guild_id: int, **values):
+        await asyncio.to_thread(self.db.guild_settings.update_one, {"guild_id": guild_id}, {"$set": values}, upsert=True)
 
     async def on_ready(self):
-        print(f"[bot] Logged in as {self.user} ({self.user.id})")
-
-    async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.MissingPermissions):
-            msg = "You need Administrator permission to use this command."
-        else:
-            print(f"[bot] App command error: {error}")
-            msg = "Something went wrong while running this command."
-
-        if interaction.response.is_done():
-            await interaction.followup.send(msg, ephemeral=True)
-        else:
-            await interaction.response.send_message(msg, ephemeral=True)
-
-    async def on_command_error(self, ctx, error):
-        if isinstance(error, commands.MissingPermissions):
-            await ctx.send("You do not have permission to use this command.")
-        elif isinstance(error, commands.CommandNotFound):
-            return
-        else:
-            print(f"[bot] Command error: {error}")
+        logger.info("Logged in as %s (%s)", self.user, self.user.id if self.user else "unknown")
 
     async def on_member_join(self, member: discord.Member):
-        if member.bot:
+        config = await self.guild_config(member.guild.id)
+        for role_id in config.get("auto_roles", []):
+            role = member.guild.get_role(role_id)
+            if role:
+                try:
+                    await member.add_roles(role, reason="Configured auto-role")
+                except discord.HTTPException:
+                    logger.warning("Unable to apply auto-role in %s", member.guild.id)
+        channel = member.guild.get_channel(config.get("welcome_channel")) if config.get("welcome_channel") else None
+        if isinstance(channel, discord.TextChannel):
+            await channel.send(embed=embed("Welcome", f"Welcome {member.mention} to **{member.guild.name}**."))
+
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild:
             return
-
-        guild = member.guild
-        try:
-            role = await self.get_or_create_role(guild)
-        except Exception as exc:
-            print(f"[bot] Failed to create {ROLE_NAME} role: {exc}")
-            return
-
-        try:
-            await member.add_roles(role, reason="Onboarding greeting required")
-        except Exception as exc:
-            print(f"[bot] Failed to add {ROLE_NAME} role: {exc}")
-            return
-
-        config = await self.get_config(guild.id)
-        if not config:
-            return
-
-        channel = guild.get_channel(config.get("channel_id"))
-        if not channel:
-            return
-
-        await self.apply_role_permissions(guild, role, channel)
-
-    async def on_voice_state_update(self, member, before, after):
-        if member.bot:
-            return
-
-        if before.channel == after.channel or after.channel is None:
-            return
-
-        config = await self.get_config(member.guild.id)
-        if not config:
-            return
-
-        if after.channel.id != config.get("channel_id"):
-            return
-
-        role = discord.utils.get(member.guild.roles, name=ROLE_NAME)
-        if role is None or role not in member.roles:
-            return
-
-        prompt = config.get("prompt")
-        if not prompt:
-            return
-
-        # One greeting at a time per guild (avoids "already playing" errors)
-        async with self.guild_lock(member.guild.id):
-            # re-check: member may have left or been welcomed while waiting
-            if member.voice is None or member.voice.channel != after.channel:
+        config = await self.guild_config(message.guild.id)
+        if config.get("automod_enabled", True) and not whitelist_service.is_whitelisted(message.guild.id, message.author.id):
+            key = (message.guild.id, message.author.id)
+            now = time.monotonic()
+            bucket = self.spam[key]
+            bucket.append(now)
+            while bucket and now - bucket[0] > 8:
+                bucket.popleft()
+            blocked = len(bucket) >= 7 or ("http://" in message.content.lower() or "https://" in message.content.lower()) and config.get("anti_links", False)
+            if blocked:
+                try:
+                    await message.delete()
+                    await message.author.timeout(timedelta(minutes=1), reason="Automod violation")
+                except (discord.Forbidden, discord.HTTPException):
+                    logger.warning("Automod could not act in %s", message.guild.id)
                 return
-            if role not in member.roles:
-                return
+        await self.process_commands(message)
 
-            try:
-                await self.play_greeting(after.channel, prompt)
-            except Exception as exc:
-                print(f"[bot] Greet voice flow failed: {exc}")
-                return
-
-            try:
-                await member.move_to(None)
-            except Exception:
-                pass
-
-            try:
-                await member.remove_roles(role, reason="Welcome flow completed")
-            except Exception as exc:
-                print(f"[bot] Failed to remove {ROLE_NAME} role: {exc}")
-
-    async def play_greeting(self, channel: discord.VoiceChannel, prompt: str):
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp:
-            temp_path = temp.name
-
-        try:
-            # gTTS is blocking (network) -> thread
-            def make_tts():
-                gTTS(text=prompt, lang="en").save(temp_path)
-
-            await asyncio.to_thread(make_tts)
-
-            # Reuse existing connection (e.g. from /greetvoice auto-join)
-            voice = channel.guild.voice_client
-            connected_here = False
-            if voice is None:
-                voice = await channel.connect()
-                connected_here = True
-            elif voice.channel != channel:
-                await voice.move_to(channel)
-
-            try:
-                if voice.is_playing():
-                    voice.stop()
-                voice.play(discord.FFmpegPCMAudio(temp_path))
-                while voice.is_playing():
-                    await asyncio.sleep(0.5)
-            finally:
-                # Only leave if we joined just for this greeting
-                if connected_here:
-                    await voice.disconnect(force=True)
-        finally:
-            try:
-                os.remove(temp_path)
-            except FileNotFoundError:
-                pass
+    async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        logger.exception("Application command failed", exc_info=error)
+        await safe_send(interaction, "The command could not be completed. Check my permissions and try again.")
 
 
-bot = TitaniumWhiteBot()
+bot = TitaniumBot()
+
+admin_group = app_commands.Group(name="config", description="Manage server configuration")
+mod_group = app_commands.Group(name="mod", description="Moderation tools")
+level_group = app_commands.Group(name="level", description="Leveling tools")
+bot.tree.add_command(admin_group)
+bot.tree.add_command(mod_group)
+bot.tree.add_command(level_group)
 
 
-@bot.tree.command(name="greetvoice", description="Configure onboarding greet voice")
-@app_commands.describe(channel="Voice channel to greet in", prompt="Text to convert to speech")
-@app_commands.checks.has_permissions(administrator=True)
-async def greetvoice(interaction: discord.Interaction, channel: discord.VoiceChannel, prompt: str):
-    guild = interaction.guild
-    if guild is None:
-        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
-        return
+@bot.tree.command(name="help", description="Show Titanium White features")
+async def help_command(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=embed("Titanium White", "Use `/config`, `/mod`, `/level`, `/ticket`, `/play`, and `/setgreetvoice`."), ephemeral=True)
 
-    # Permission loops can take a while -> defer to avoid the 3s interaction timeout
-    await interaction.response.defer(ephemeral=False)
 
-    await bot.save_config(guild.id, channel.id, prompt)
+@bot.tree.command(name="ping", description="Show bot latency")
+async def ping(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=embed("Pong", f"WebSocket: `{round(bot.latency * 1000)}ms`"), ephemeral=True)
 
+
+@bot.tree.command(name="uptime", description="Show bot uptime")
+async def uptime(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=embed("Uptime", f"`{int(time.monotonic() - bot.started_at)} seconds`"), ephemeral=True)
+
+
+@admin_group.command(name="panel", description="Open the interactive configuration panel")
+async def config_panel(interaction: discord.Interaction):
+    if not await require_admin(interaction): return
+    await interaction.response.send_message(embed=embed("Titanium Configuration", "Choose a category below."), view=ConfigView(bot), ephemeral=True)
+
+
+@admin_group.command(name="toggle", description="Enable or disable a feature")
+@app_commands.describe(feature="Feature name", enabled="Whether the feature is enabled")
+async def config_toggle(interaction: discord.Interaction, feature: str, enabled: bool):
+    if not await require_admin(interaction): return
+    allowed = {"automod", "leveling", "music", "tickets", "anti_links"}
+    if feature not in allowed:
+        await interaction.response.send_message(f"Feature must be one of: {', '.join(sorted(allowed))}.", ephemeral=True); return
+    await bot.set_config(interaction.guild_id, **{f"{feature}_enabled" if feature != "anti_links" else feature: enabled})
+    await interaction.response.send_message(f"`{feature}` is now **{'enabled' if enabled else 'disabled'}**.", ephemeral=True)
+
+
+@bot.tree.command(name="setgreetvoice", description="Configure restricted voice onboarding")
+@app_commands.describe(channel="Onboarding voice channel", tts_text="Greeting text")
+async def setgreetvoice(interaction: discord.Interaction, channel: discord.VoiceChannel, tts_text: str):
+    if not await require_admin(interaction): return
+    await bot.set_config(interaction.guild_id, greet_channel=channel.id, greet_text=tts_text[:500])
+    await interaction.response.send_message(embed=embed("Onboarding voice configured", f"Channel: {channel.mention}\nText: {tts_text[:500]}"), ephemeral=True)
+
+
+@admin_group.command(name="leavelogging", description="Set the leave request log channel")
+async def leavelogging(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not await require_admin(interaction): return
+    await bot.set_config(interaction.guild_id, leave_log_channel=channel.id)
+    await interaction.response.send_message(f"Leave requests will be sent to {channel.mention}.", ephemeral=True)
+
+
+@admin_group.command(name="setup_leave", description="Post the staff leave application panel")
+async def setup_leave(interaction: discord.Interaction):
+    if not await require_admin(interaction): return
+    await interaction.channel.send(embed=embed("Staff Leave", "Submit a leave request using the button below."), view=LeaveView(bot))
+    await interaction.response.send_message("Leave panel posted.", ephemeral=True)
+
+
+@admin_group.command(name="whitelist", description="Add or remove an automod whitelist entry")
+@app_commands.describe(action="add or remove", user="User to whitelist")
+@app_commands.choices(action=[app_commands.Choice(name="add", value="add"), app_commands.Choice(name="remove", value="remove")])
+async def whitelist(interaction: discord.Interaction, action: app_commands.Choice[str], user: discord.Member):
+    if not await require_admin(interaction): return
+    if action.value == "add": whitelist_service.add(interaction.guild_id, user.id, "user", "Configured by administrator", interaction.user.id)
+    else: whitelist_service.remove(interaction.guild_id, user.id)
+    await interaction.response.send_message(f"Whitelist entry **{action.value}** completed for {user.mention}.", ephemeral=True)
+
+
+async def moderate(interaction: discord.Interaction, member: discord.Member, reason: str, action: str):
+    if not await require_moderator(interaction): return
+    if member == interaction.user or member.top_role >= interaction.user.top_role:
+        await interaction.response.send_message("You cannot moderate that member due to role hierarchy.", ephemeral=True); return
     try:
-        role = await bot.get_or_create_role(guild)
-    except Exception as exc:
-        await interaction.followup.send(f"Could not create `{ROLE_NAME}` role: {exc}", ephemeral=True)
-        return
-
-    await bot.apply_role_permissions(guild, role, channel)
-
-    embed = discord.Embed(title="Greet Voice Enabled", color=discord.Color.green())
-    embed.add_field(name="Channel", value=channel.mention, inline=False)
-    embed.add_field(name="Prompt", value=prompt[:1024], inline=False)
-    await interaction.followup.send(embed=embed)
-
-    try:
-        if guild.voice_client is None:
-            await channel.connect()
-        elif guild.voice_client.channel != channel:
-            await guild.voice_client.move_to(channel)
-    except Exception as exc:
-        print(f"[bot] Could not auto-join greet voice channel: {exc}")
+        if action == "warn":
+            await bot.db.mod_logs.insert_one({"guild_id": interaction.guild_id, "action": action, "target_id": member.id, "moderator_id": interaction.user.id, "reason": reason})
+        elif action == "timeout": await member.timeout(timedelta(minutes=10), reason=reason)
+        elif action == "kick": await member.kick(reason=reason)
+        else: await member.ban(reason=reason)
+        await interaction.response.send_message(embed=embed(f"{action.title()} applied", f"Target: {member.mention}\nReason: {reason}"), ephemeral=True)
+    except discord.Forbidden:
+        await interaction.response.send_message("I do not have the required permission or role position.", ephemeral=True)
 
 
-def main():
-    try:
-        token = require_env("DISCORD_TOKEN")
-        require_env("DATABASE_URL")
-    except Exception as exc:
-        print(f"[bot] Startup failed: {exc}")
-        sys.exit(1)
+for name, description, action in (("warn", "Warn a member", "warn"), ("timeout", "Timeout a member", "timeout"), ("kick", "Kick a member", "kick"), ("ban", "Ban a member", "ban")):
+    async def handler(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided", _action=action):
+        await moderate(interaction, member, reason, _action)
+    handler.__name__ = name
+    mod_group.add_command(app_commands.Command(name=name, description=description, callback=handler))
 
-    try:
-        bot.run(token)
-    except Exception as exc:
-        print(f"[bot] Discord client failed to start: {exc}")
-        raise
+
+@level_group.command(name="rank", description="Show your level and XP")
+async def rank(interaction: discord.Interaction, member: discord.Member | None = None):
+    member = member or interaction.user
+    profile = await asyncio.to_thread(bot.db.profiles.find_one, {"guild_id": interaction.guild_id, "user_id": member.id}) or {"xp": 0, "level": 0}
+    await interaction.response.send_message(embed=embed(f"{member.display_name}'s rank", f"Level: **{profile.get('level', 0)}**\nXP: **{profile.get('xp', 0)}**"), ephemeral=True)
 
 
 if __name__ == "__main__":
-    main()
+    bot.run(settings.discord_token)
